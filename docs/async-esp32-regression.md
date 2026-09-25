@@ -47,3 +47,18 @@ start, approximately once per second during upload, and on upload completion.
 Use a firmware image large enough to produce at least one progress sample, and
 retain the serial log with the change review. The ESP32 measurements are emitted
 as `[heap] <checkpoint>: free=<bytes> min_free=<bytes>`.
+
+With `ELEGANTOTA_DEBUG=1`, route setup also logs a rolling free-heap delta
+after each `AsyncWebServer::on()` call:
+
+```
+[ElegantOTA] async route /update: free_heap=<bytes> delta=<bytes>
+```
+
+The deltas make the library's retained route-handler allocations visible. This
+repository pins `esp32async/ESPAsyncWebServer` to 3.12.0 for that comparison:
+the dependency allocates one retained callback handler per `on()` registration,
+so `/ota/metadata` and `/ota/start` remain separate routes to preserve the
+portal's existing GET API. The bundled portal is served from `/update` and
+makes same-origin requests to these endpoints; it does not need CORS or a
+forced `Connection: close` response header.

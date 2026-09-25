@@ -6,17 +6,35 @@
  * compiled against, so the two builds cannot drift apart.
  */
 #if ELEGANTOTA_USE_ASYNC_WEBSERVER == 1
-  #define EOTA_ROUTE(...)   [&](AsyncWebServerRequest *request) __VA_ARGS__
+  // AsyncWebServer retains these callbacks. Capture only the instance pointer
+  // they need, rather than an implicit reference to this stack frame.
+  #define EOTA_ROUTE(...)   [this](AsyncWebServerRequest *request) __VA_ARGS__
   #define EOTA_GUARD()      if (_auth_configuration_invalid || (_authenticate && !request->authenticate(_username, _password))) { request->requestAuthentication(); return; }
   #define EOTA_HAS(n)       request->hasParam(n)
   #define EOTA_ARG(n)       request->getParam(n)->value()
   #define EOTA_SEND(c,t,b)  request->send((c), (t), (b))
 #else
-  #define EOTA_ROUTE(...)   [&]() __VA_ARGS__
+  #define EOTA_ROUTE(...)   [this]() __VA_ARGS__
   #define EOTA_GUARD()      if (_auth_configuration_invalid || (_authenticate && !_server->authenticate(_username, _password))) { _server->requestAuthentication(); return; }
   #define EOTA_HAS(n)       _server->hasArg(n)
   #define EOTA_ARG(n)       _server->arg(n)
   #define EOTA_SEND(c,t,b)  _server->send((c), (t), (b))
+#endif
+
+// Route registration is a one-time allocation in ESPAsyncWebServer. Keep the
+// measurement behind the normal debug switch so production builds pay no
+// code-size or runtime cost. The delta is from the preceding registration (or
+// from entry to _registerRoutes for /update).
+#if ELEGANTOTA_USE_ASYNC_WEBSERVER == 1 && ELEGANTOTA_DEBUG && (defined(ESP8266) || defined(ESP32))
+  #define EOTA_ASYNC_ROUTE_HEAP_BEGIN() uint32_t eota_route_heap = ESP.getFreeHeap()
+  #define EOTA_ASYNC_ROUTE_HEAP_DELTA(route) do { \
+    const uint32_t eota_free_heap = ESP.getFreeHeap(); \
+    Serial.printf("[ElegantOTA] async route %s: free_heap=%lu delta=%ld\\n", (route), (unsigned long)eota_free_heap, (long)eota_free_heap - (long)eota_route_heap); \
+    eota_route_heap = eota_free_heap; \
+  } while (0)
+#else
+  #define EOTA_ASYNC_ROUTE_HEAP_BEGIN()
+  #define EOTA_ASYNC_ROUTE_HEAP_DELTA(route)
 #endif
 
 ElegantOTAClass::ElegantOTAClass(){}
@@ -185,9 +203,10 @@ void ElegantOTAClass::begin(ELEGANTOTA_WEBSERVER *server, const char * username,
 }
 
 void ElegantOTAClass::_registerRoutes(){
+  EOTA_ASYNC_ROUTE_HEAP_BEGIN();
   // Portal
   #if ELEGANTOTA_USE_ASYNC_WEBSERVER == 1
-    _server->on("/update", HTTP_GET, [&](AsyncWebServerRequest *request){
+    _server->on("/update", HTTP_GET, [this](AsyncWebServerRequest *request){
       if(_auth_configuration_invalid || (_authenticate && !request->authenticate(_username, _password))){
         return request->requestAuthentication();
       }
@@ -199,8 +218,9 @@ void ElegantOTAClass::_registerRoutes(){
       response->addHeader("Content-Encoding", "gzip");
       request->send(response);
     });
+    EOTA_ASYNC_ROUTE_HEAP_DELTA("/update");
   #else
-    _server->on("/update", HTTP_GET, [&](){
+    _server->on("/update", HTTP_GET, [this](){
       if (_auth_configuration_invalid || (_authenticate && !_server->authenticate(_username, _password))) {
         return _server->requestAuthentication();
       }
@@ -215,6 +235,7 @@ void ElegantOTAClass::_registerRoutes(){
     _buildMetadata(json, sizeof(json));
     EOTA_SEND(200, "application/json", json);
   }));
+  EOTA_ASYNC_ROUTE_HEAP_DELTA("/ota/metadata");
 
   // Open the flash region ahead of an upload
   _server->on("/ota/start", HTTP_GET, EOTA_ROUTE({
@@ -278,10 +299,11 @@ void ElegantOTAClass::_registerRoutes(){
 
     EOTA_SEND(200, "text/plain", "OK");
   }));
+  EOTA_ASYNC_ROUTE_HEAP_DELTA("/ota/start");
 
   // Browser upload
   #if ELEGANTOTA_USE_ASYNC_WEBSERVER == 1
-    _server->on("/ota/upload", HTTP_POST, [&](AsyncWebServerRequest *request) {
+    _server->on("/ota/upload", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if(_auth_configuration_invalid || (_authenticate && !request->authenticate(_username, _password))){
           return request->requestAuthentication();
         }
@@ -295,8 +317,6 @@ void ElegantOTAClass::_registerRoutes(){
           }
         #endif
         AsyncWebServerResponse *response = request->beginResponse((Update.hasError()) ? 400 : 200, "text/plain", (Update.hasError()) ? _updateErrorMessage() : "OK");
-        response->addHeader("Connection", "close");
-        response->addHeader("Access-Control-Allow-Origin", "*");
         request->send(response);
         // Set reboot flag
         if (!Update.hasError()) {
@@ -305,7 +325,7 @@ void ElegantOTAClass::_registerRoutes(){
             _reboot = true;
           }
         }
-    }, [&](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+    }, [this](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
         //Upload handler chunks in data
         if(_auth_configuration_invalid || _authenticate){
             if(_auth_configuration_invalid || !request->authenticate(_username, _password)){
@@ -343,8 +363,9 @@ void ElegantOTAClass::_registerRoutes(){
             return;
         }
     });
+    EOTA_ASYNC_ROUTE_HEAP_DELTA("/ota/upload");
   #else
-    _server->on("/ota/upload", HTTP_POST, [&](){
+    _server->on("/ota/upload", HTTP_POST, [this](){
       if (_auth_configuration_invalid || (_authenticate && !_server->authenticate(_username, _password))) {
         return _server->requestAuthentication();
       }
@@ -357,7 +378,6 @@ void ElegantOTAClass::_registerRoutes(){
           _legacy_post_update_callback(!Update.hasError());
         }
       #endif
-      _server->sendHeader("Connection", "close");
       _server->send((Update.hasError()) ? 400 : 200, "text/plain", (Update.hasError()) ? _updateErrorMessage() : "OK");
       // Set reboot flag
       if (!Update.hasError()) {
@@ -366,7 +386,7 @@ void ElegantOTAClass::_registerRoutes(){
           _reboot = true;
         }
       }
-    }, [&](){
+    }, [this](){
       // Actual OTA Download
       HTTPUpload& upload = _server->upload();
       if (upload.status == UPLOAD_FILE_START) {
@@ -411,6 +431,9 @@ void ElegantOTAClass::_registerRoutes(){
     });
   #endif
 }
+
+#undef EOTA_ASYNC_ROUTE_HEAP_BEGIN
+#undef EOTA_ASYNC_ROUTE_HEAP_DELTA
 
 // ---------------------------------------------------------------------------
 // Configuration
