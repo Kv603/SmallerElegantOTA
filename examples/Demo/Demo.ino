@@ -57,13 +57,13 @@ const char* password = "";
 
 unsigned long ota_progress_millis = 0;
 
-void onOTAStart() {
+void onOTAStart(void *) {
   // Log when OTA has started
   Serial.println("OTA update started!");
   // <Add your own code here>
 }
 
-void onOTAProgress(size_t current, size_t final) {
+void onOTAProgress(void *, size_t current, size_t final) {
   // Log every 1 second
   if (millis() - ota_progress_millis > 1000) {
     ota_progress_millis = millis();
@@ -71,7 +71,7 @@ void onOTAProgress(size_t current, size_t final) {
   }
 }
 
-void onOTAEnd(bool success) {
+void onOTAEnd(void *, bool success) {
   // Log when OTA has finished
   if (success) {
     Serial.println("OTA update finished successfully!");

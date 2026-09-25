@@ -35,6 +35,16 @@ _____ _                        _    ___ _____  _
   #define UPDATE_DEBUG 0
 #endif
 
+/**
+ * Set this project-wide build macro to 1 only when sketches still need the
+ * legacy std::function callback overloads (for example, for capturing
+ * lambdas). The default callback API stores only a function pointer and
+ * caller-owned context pointer per hook.
+ */
+#ifndef ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+  #define ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS 0
+#endif
+
 #if ELEGANTOTA_DEBUG
   #define ELEGANTOTA_DEBUG_MSG(x) Serial.printf("%s %s", "[ElegantOTA] ", x)
 #else
@@ -42,7 +52,9 @@ _____ _                        _    ___ _____  _
 #endif
 
 #if defined(ESP8266)
-  #include <functional>
+  #if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+    #include <functional>
+  #endif
   #include "FS.h"
   #include "LittleFS.h"
   #include "Updater.h"
@@ -59,7 +71,9 @@ _____ _                        _    ___ _____  _
   #endif
   #define HARDWARE "ESP8266"
 #elif defined(ESP32)
-  #include <functional>
+  #if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+    #include <functional>
+  #endif
   #include "FS.h"
   #include "Update.h"
   #include "StreamString.h"
@@ -76,7 +90,9 @@ _____ _                        _    ___ _____  _
   #endif
   #define HARDWARE "ESP32"
 #elif defined(TARGET_RP2040) || defined(TARGET_RP2350) || defined(PICO_RP2040) || defined(PICO_RP2350)
-  #include <functional>
+  #if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+    #include <functional>
+  #endif
   #include "Arduino.h"
   #include "StreamString.h"
   #include "FS.h"
@@ -109,6 +125,10 @@ enum OTA_Mode {
 
 class ElegantOTAClass{
   public:
+    typedef void (*StartCallback)(void * context);
+    typedef void (*ProgressCallback)(void * context, size_t current, size_t final);
+    typedef void (*EndCallback)(void * context, bool success);
+
     /** Maximum accepted username or password length, excluding its NUL byte. */
     static const size_t MAX_AUTH_LENGTH = 64;
     /** Maximum Update error text retained for an HTTP error response. */
@@ -131,9 +151,28 @@ class ElegantOTAClass{
     void setAutoReboot(bool enable);
     void loop();
 
-    void onStart(std::function<void()> callable);
-    void onProgress(std::function<void(size_t current, size_t final)> callable);
-    void onEnd(std::function<void(bool success)> callable);
+    /**
+     * Register allocation-free OTA callbacks. `context` is passed unchanged
+     * to every invocation and remains owned by the caller. Passing NULL as a
+     * callback clears that hook. The callbacks run at the same points as the
+     * legacy API: before Update.begin(), in the upload completion handler
+     * before its response is sent, and once for every written upload chunk,
+     * respectively.
+     */
+    void onStart(StartCallback callback, void * context = NULL);
+    void onProgress(ProgressCallback callback, void * context = NULL);
+    void onEnd(EndCallback callback, void * context = NULL);
+
+    #if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+      /**
+       * Legacy allocating callback overloads. Set the project-wide
+       * ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS build macro to 1 only when
+       * a capturing lambda or std::function is required.
+       */
+      void onStart(std::function<void()> callable);
+      void onProgress(std::function<void(size_t current, size_t final)> callable);
+      void onEnd(std::function<void(bool success)> callable);
+    #endif
     
   private:
     ELEGANTOTA_WEBSERVER *_server;
@@ -153,9 +192,18 @@ class ElegantOTAClass{
     size_t _update_error_length = 0;
     unsigned long _current_progress_size;
 
-    std::function<void()> preUpdateCallback = NULL;
-    std::function<void(size_t current, size_t final)> progressUpdateCallback = NULL;
-    std::function<void(bool success)> postUpdateCallback = NULL;
+    StartCallback _pre_update_callback = NULL;
+    void * _pre_update_context = NULL;
+    ProgressCallback _progress_update_callback = NULL;
+    void * _progress_update_context = NULL;
+    EndCallback _post_update_callback = NULL;
+    void * _post_update_context = NULL;
+
+    #if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+      std::function<void()> _legacy_pre_update_callback = NULL;
+      std::function<void(size_t current, size_t final)> _legacy_progress_update_callback = NULL;
+      std::function<void(bool success)> _legacy_post_update_callback = NULL;
+    #endif
 
     // Shared helpers
     void _registerRoutes();

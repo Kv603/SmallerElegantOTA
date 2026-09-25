@@ -109,6 +109,41 @@ Open `http://<device-ip>/update` in a browser and you have the portal.
 
 Full sketches live in [`examples/`](examples) - [`Demo`](examples/Demo/Demo.ino) for the synchronous webserver, [`AsyncDemo`](examples/AsyncDemo/AsyncDemo.ino) for `ESPAsyncWebServer`.
 
+### OTA callbacks without heap allocation
+
+Callbacks use function pointers by default, so registering one does not retain a
+`std::function` or allocate memory. Each callback receives the caller-owned
+context pointer passed at registration; use `nullptr` when no state is needed.
+
+```cpp
+struct OtaState { unsigned long lastReport = 0; } ota;
+
+void onStart(void *context) {
+  (void)context;
+  Serial.println("OTA update started");
+}
+
+void onProgress(void *context, size_t current, size_t total) {
+  OtaState *state = static_cast<OtaState *>(context);
+  // Use state, current, and total.
+}
+
+void onEnd(void *context, bool success) {
+  (void)context;
+  Serial.println(success ? "OTA update finished" : "OTA update failed");
+}
+
+ElegantOTA.onStart(onStart);
+ElegantOTA.onProgress(onProgress, &ota);
+ElegantOTA.onEnd(onEnd);
+```
+
+Projects that need legacy `std::function` callbacks, including capturing
+lambdas, can enable the project-wide build flag
+`-DELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS=1`. That opt-in restores the
+allocating overloads; prefer the function-pointer callbacks for new code and
+constrained devices.
+
 ### Async mode
 
 ElegantOTA can serve its routes through `ESPAsyncWebServer` instead of the built-in synchronous server. Enable it with a build flag:

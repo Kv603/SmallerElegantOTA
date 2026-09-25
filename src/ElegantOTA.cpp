@@ -253,7 +253,14 @@ void ElegantOTAClass::_registerRoutes(){
     }
 
     // Pre-OTA update callback
-    if (preUpdateCallback != NULL) preUpdateCallback();
+    if (_pre_update_callback != NULL) {
+      _pre_update_callback(_pre_update_context);
+    }
+    #if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+      else if (_legacy_pre_update_callback != NULL) {
+        _legacy_pre_update_callback();
+      }
+    #endif
 
     if (!_beginUpdate(mode)) {
       EOTA_SEND(400, "text/plain", _updateErrorMessage());
@@ -279,7 +286,14 @@ void ElegantOTAClass::_registerRoutes(){
           return request->requestAuthentication();
         }
         // Post-OTA update callback
-        if (postUpdateCallback != NULL) postUpdateCallback(!Update.hasError());
+        if (_post_update_callback != NULL) {
+          _post_update_callback(_post_update_context, !Update.hasError());
+        }
+        #if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+          else if (_legacy_post_update_callback != NULL) {
+            _legacy_post_update_callback(!Update.hasError());
+          }
+        #endif
         AsyncWebServerResponse *response = request->beginResponse((Update.hasError()) ? 400 : 200, "text/plain", (Update.hasError()) ? _updateErrorMessage() : "OK");
         response->addHeader("Connection", "close");
         response->addHeader("Access-Control-Allow-Origin", "*");
@@ -311,7 +325,14 @@ void ElegantOTAClass::_registerRoutes(){
             }
             _current_progress_size += len;
             // Progress update callback
-            if (progressUpdateCallback != NULL) progressUpdateCallback(_current_progress_size, request->contentLength());
+            if (_progress_update_callback != NULL) {
+              _progress_update_callback(_progress_update_context, _current_progress_size, request->contentLength());
+            }
+            #if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+              else if (_legacy_progress_update_callback != NULL) {
+                _legacy_progress_update_callback(_current_progress_size, request->contentLength());
+              }
+            #endif
         }
 
         if (final) { // if the final flag is set then this is the last frame of data
@@ -328,7 +349,14 @@ void ElegantOTAClass::_registerRoutes(){
         return _server->requestAuthentication();
       }
       // Post-OTA update callback
-      if (postUpdateCallback != NULL) postUpdateCallback(!Update.hasError());
+      if (_post_update_callback != NULL) {
+        _post_update_callback(_post_update_context, !Update.hasError());
+      }
+      #if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+        else if (_legacy_post_update_callback != NULL) {
+          _legacy_post_update_callback(!Update.hasError());
+        }
+      #endif
       _server->sendHeader("Connection", "close");
       _server->send((Update.hasError()) ? 400 : 200, "text/plain", (Update.hasError()) ? _updateErrorMessage() : "OK");
       // Set reboot flag
@@ -358,7 +386,14 @@ void ElegantOTAClass::_registerRoutes(){
 
           _current_progress_size += upload.currentSize;
           // Progress update callback
-          if (progressUpdateCallback != NULL) progressUpdateCallback(_current_progress_size, upload.totalSize);
+          if (_progress_update_callback != NULL) {
+            _progress_update_callback(_progress_update_context, _current_progress_size, upload.totalSize);
+          }
+          #if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+            else if (_legacy_progress_update_callback != NULL) {
+              _legacy_progress_update_callback(_current_progress_size, upload.totalSize);
+            }
+          #endif
       } else if (upload.status == UPLOAD_FILE_END) {
           if (Update.end(true)) {
               ELEGANTOTA_DEBUG_MSG(String("Update Success: "+String(upload.totalSize)+"\n").c_str());
@@ -437,16 +472,48 @@ void ElegantOTAClass::loop() {
   }
 }
 
+void ElegantOTAClass::onStart(StartCallback callback, void * context){
+    _pre_update_callback = callback;
+    _pre_update_context = context;
+    #if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+      _legacy_pre_update_callback = NULL;
+    #endif
+}
+
+void ElegantOTAClass::onProgress(ProgressCallback callback, void * context){
+    _progress_update_callback = callback;
+    _progress_update_context = context;
+    #if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+      _legacy_progress_update_callback = NULL;
+    #endif
+}
+
+void ElegantOTAClass::onEnd(EndCallback callback, void * context){
+    _post_update_callback = callback;
+    _post_update_context = context;
+    #if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
+      _legacy_post_update_callback = NULL;
+    #endif
+}
+
+#if ELEGANTOTA_ENABLE_STD_FUNCTION_CALLBACKS
 void ElegantOTAClass::onStart(std::function<void()> callable){
-    preUpdateCallback = callable;
+    _pre_update_callback = NULL;
+    _pre_update_context = NULL;
+    _legacy_pre_update_callback = callable;
 }
 
 void ElegantOTAClass::onProgress(std::function<void(size_t current, size_t final)> callable){
-    progressUpdateCallback= callable;
+    _progress_update_callback = NULL;
+    _progress_update_context = NULL;
+    _legacy_progress_update_callback = callable;
 }
 
 void ElegantOTAClass::onEnd(std::function<void(bool success)> callable){
-    postUpdateCallback = callable;
+    _post_update_callback = NULL;
+    _post_update_context = NULL;
+    _legacy_post_update_callback = callable;
 }
+#endif
 
 ElegantOTAClass ElegantOTA;
