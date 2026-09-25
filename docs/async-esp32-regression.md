@@ -1,0 +1,49 @@
+# Async ESP32 footprint and heap regression policy
+
+The `async-esp32-size` PlatformIO environment is the repeatable ESP32 baseline
+for the `examples/AsyncDemo` sketch. It uses the `esp32dev` board and the
+repository-owned `partitions/elegantota_4mb_ota.csv` scheme: two 1.875 MiB OTA
+application slots and a 192 KiB SPIFFS partition on a 4 MiB flash device.
+
+Build and print the report locally with:
+
+```sh
+PLATFORMIO_SRC_DIR=examples/AsyncDemo pio run -e async-esp32-size
+python3 tools/report_esp32_size.py \
+  --elf .pio/build/async-esp32-size/firmware.elf \
+  --map .pio/build/async-esp32-size/firmware.map
+```
+
+The report reads the target toolchain's ELF section table and the generated OTA
+binary. It prints `.text`, `.rodata`, `.data`, `.bss`, and the actual `.bin`
+image size. The CI job writes the same report to `async-esp32-size-report.json`
+and uploads it with the ELF and map so a change can be investigated without
+rebuilding.
+
+## Accepted regressions
+
+Compare a pull request with the latest successful `Async ESP32 Footprint`
+artifact from the target branch. A change is accepted when all of the following
+are true:
+
+| Measurement | Allowed regression |
+| --- | ---: |
+| `.text` + `.rodata` | at most 16 KiB |
+| `.data` + `.bss` | at most 4 KiB |
+| OTA `.bin` image size | at most 16 KiB |
+| `ESP.getFreeHeap()` at every checkpoint | no decrease greater than 8 KiB |
+| `ESP.getMinFreeHeap()` at every checkpoint | no decrease greater than 8 KiB |
+
+Larger increases require an issue or pull-request note explaining the feature,
+the before/after report values, and confirmation that the image still fits in
+the 1.875 MiB OTA slot. Improvements (smaller sizes or higher heap readings)
+are always accepted.
+
+## Runtime heap capture
+
+`AsyncDemo` logs free and minimum-free heap immediately before
+`ElegantOTA.begin()`, immediately after it registers its routes, on upload
+start, approximately once per second during upload, and on upload completion.
+Use a firmware image large enough to produce at least one progress sample, and
+retain the serial log with the change review. The ESP32 measurements are emitted
+as `[heap] <checkpoint>: free=<bytes> min_free=<bytes>`.
