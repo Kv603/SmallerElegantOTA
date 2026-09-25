@@ -51,9 +51,21 @@ AsyncWebServer server(80);
 
 unsigned long ota_progress_millis = 0;
 
+#if defined(ESP32)
+void reportHeap(const char *checkpoint) {
+  Serial.printf("[heap] %s: free=%u min_free=%u\n", checkpoint,
+                ESP.getFreeHeap(), ESP.getMinFreeHeap());
+}
+#else
+void reportHeap(const char *checkpoint) {
+  Serial.printf("[heap] %s: ESP32 heap watermark unavailable\n", checkpoint);
+}
+#endif
+
 void onOTAStart() {
   // Log when OTA has started
   Serial.println("OTA update started!");
+  reportHeap("upload started");
   // <Add your own code here>
 }
 
@@ -62,6 +74,7 @@ void onOTAProgress(size_t current, size_t final) {
   if (millis() - ota_progress_millis > 1000) {
     ota_progress_millis = millis();
     Serial.printf("OTA Progress Current: %u bytes, Final: %u bytes\n", current, final);
+    reportHeap("upload progress");
   }
 }
 
@@ -72,6 +85,7 @@ void onOTAEnd(bool success) {
   } else {
     Serial.println("There was an error during OTA update!");
   }
+  reportHeap("upload finished");
   // <Add your own code here>
 }
 
@@ -96,7 +110,9 @@ void setup(void) {
     request->send(200, "text/plain", "Hi! This is ElegantOTA AsyncDemo.");
   });
 
-  ElegantOTA.begin(&server);    // Start ElegantOTA
+  reportHeap("before ElegantOTA.begin");
+  ElegantOTA.begin(&server);    // Registers ElegantOTA routes
+  reportHeap("after ElegantOTA route registration");
   // ElegantOTA callbacks
   ElegantOTA.onStart(onOTAStart);
   ElegantOTA.onProgress(onOTAProgress);
