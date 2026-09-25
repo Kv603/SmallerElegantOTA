@@ -7,13 +7,13 @@
  */
 #if ELEGANTOTA_USE_ASYNC_WEBSERVER == 1
   #define EOTA_ROUTE(...)   [&](AsyncWebServerRequest *request) __VA_ARGS__
-  #define EOTA_GUARD()      if (_authenticate && !request->authenticate(_username.c_str(), _password.c_str())) { request->requestAuthentication(); return; }
+  #define EOTA_GUARD()      if (_auth_configuration_invalid || (_authenticate && !request->authenticate(_username, _password))) { request->requestAuthentication(); return; }
   #define EOTA_HAS(n)       request->hasParam(n)
   #define EOTA_ARG(n)       request->getParam(n)->value()
   #define EOTA_SEND(c,t,b)  request->send((c), (t), (b))
 #else
   #define EOTA_ROUTE(...)   [&]() __VA_ARGS__
-  #define EOTA_GUARD()      if (_authenticate && !_server->authenticate(_username.c_str(), _password.c_str())) { _server->requestAuthentication(); return; }
+  #define EOTA_GUARD()      if (_auth_configuration_invalid || (_authenticate && !_server->authenticate(_username, _password))) { _server->requestAuthentication(); return; }
   #define EOTA_HAS(n)       _server->hasArg(n)
   #define EOTA_ARG(n)       _server->arg(n)
   #define EOTA_SEND(c,t,b)  _server->send((c), (t), (b))
@@ -53,16 +53,32 @@ size_t ElegantOTAClass::_partitionSize(OTA_Mode mode) {
   #endif
 }
 
-/** A digest we are willing to hand to Update: exactly 32 hex characters. */
-bool ElegantOTAClass::_validMD5(const char * hash) {
-  if (!hash) return false;
-  size_t len = 0;
-  for (; hash[len]; len++) {
+/** Copy exactly 32 hexadecimal digest bytes into a NUL-terminated buffer. */
+bool ElegantOTAClass::_copyMD5(const char * hash, char * out) {
+  if (!hash || !out) return false;
+  for (size_t len = 0; len < 32; len++) {
     const char c = hash[len];
     const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
     if (!hex) return false;
+    out[len] = c;
   }
-  return len == 32;
+  if (hash[32] != '\0') return false;
+  out[32] = '\0';
+  return true;
+}
+
+/** Copy a C string only when it fits, always leaving destination terminated. */
+bool ElegantOTAClass::_copyBounded(const char * source, char * destination, size_t capacity, size_t &length) {
+  length = 0;
+  if (!destination || !capacity) return false;
+  destination[0] = '\0';
+  if (!source) return true;
+  while (length + 1 < capacity && source[length]) {
+    destination[length] = source[length];
+    length++;
+  }
+  destination[length] = '\0';
+  return source[length] == '\0';
 }
 
 /** Close a flash region we opened but are not going to write to. */
@@ -77,9 +93,15 @@ void ElegantOTAClass::_abortUpdate() {
 void ElegantOTAClass::_captureUpdateError() {
   StreamString str;
   Update.printError(str);
-  _update_error_str = str.c_str();
-  _update_error_str.trim();
-  ELEGANTOTA_DEBUG_MSG(_update_error_str.c_str());
+  _copyBounded(str.c_str(), _update_error, sizeof(_update_error), _update_error_length);
+  while (_update_error_length && (_update_error[_update_error_length - 1] == ' ' || _update_error[_update_error_length - 1] == '\t' || _update_error[_update_error_length - 1] == '\r' || _update_error[_update_error_length - 1] == '\n')) {
+    _update_error[--_update_error_length] = '\0';
+  }
+  ELEGANTOTA_DEBUG_MSG(_updateErrorMessage());
+}
+
+const char * ElegantOTAClass::_updateErrorMessage() const {
+  return _update_error_length ? _update_error : "Update failed";
 }
 
 bool ElegantOTAClass::_beginUpdate(OTA_Mode mode) {
@@ -166,7 +188,7 @@ void ElegantOTAClass::_registerRoutes(){
   // Portal
   #if ELEGANTOTA_USE_ASYNC_WEBSERVER == 1
     _server->on("/update", HTTP_GET, [&](AsyncWebServerRequest *request){
-      if(_authenticate && !request->authenticate(_username.c_str(), _password.c_str())){
+      if(_auth_configuration_invalid || (_authenticate && !request->authenticate(_username, _password))){
         return request->requestAuthentication();
       }
       #if defined(ASYNCWEBSERVER_VERSION) && ASYNCWEBSERVER_VERSION_MAJOR > 2  // This means we are using recommended fork of AsyncWebServer
@@ -179,7 +201,7 @@ void ElegantOTAClass::_registerRoutes(){
     });
   #else
     _server->on("/update", HTTP_GET, [&](){
-      if (_authenticate && !_server->authenticate(_username.c_str(), _password.c_str())) {
+      if (_auth_configuration_invalid || (_authenticate && !_server->authenticate(_username, _password))) {
         return _server->requestAuthentication();
       }
       _server->sendHeader("Content-Encoding", "gzip");
@@ -214,11 +236,16 @@ void ElegantOTAClass::_registerRoutes(){
     // Check the digest before opening anything. Rejecting it afterwards would
     // leave the flash region open, and every later update would be refused
     // because one is still running.
-    String hash;
-    if (EOTA_HAS("hash")) {
-      hash = EOTA_ARG("hash");
-      ELEGANTOTA_DEBUG_MSG(String("MD5: "+hash+"\n").c_str());
-      if (!_validMD5(hash.c_str())) {
+    char hash[33];
+    bool has_hash = EOTA_HAS("hash");
+    if (has_hash) {
+      #if ELEGANTOTA_USE_ASYNC_WEBSERVER == 1
+        // AsyncWebParameter owns its value for this request. Copy and validate
+        // it immediately so no Arduino String is retained by this route.
+        if (!_copyMD5(request->getParam("hash")->value().c_str(), hash)) {
+      #else
+        if (!_copyMD5(_server->arg("hash").c_str(), hash)) {
+      #endif
         ELEGANTOTA_DEBUG_MSG("ERROR: MD5 hash not valid\n");
         EOTA_SEND(400, "text/plain", "That MD5 digest is not valid");
         return;
@@ -229,13 +256,13 @@ void ElegantOTAClass::_registerRoutes(){
     if (preUpdateCallback != NULL) preUpdateCallback();
 
     if (!_beginUpdate(mode)) {
-      EOTA_SEND(400, "text/plain", _update_error_str.c_str());
+      EOTA_SEND(400, "text/plain", _updateErrorMessage());
       return;
     }
 
     // Update.begin() clears any previously set digest, so the expected hash
     // has to be handed over afterwards to actually be checked.
-    if (hash.length() && !Update.setMD5(hash.c_str())) {
+    if (has_hash && !Update.setMD5(hash)) {
       ELEGANTOTA_DEBUG_MSG("ERROR: MD5 hash rejected by Update\n");
       _abortUpdate();
       EOTA_SEND(400, "text/plain", "That MD5 digest is not valid");
@@ -248,12 +275,12 @@ void ElegantOTAClass::_registerRoutes(){
   // Browser upload
   #if ELEGANTOTA_USE_ASYNC_WEBSERVER == 1
     _server->on("/ota/upload", HTTP_POST, [&](AsyncWebServerRequest *request) {
-        if(_authenticate && !request->authenticate(_username.c_str(), _password.c_str())){
+        if(_auth_configuration_invalid || (_authenticate && !request->authenticate(_username, _password))){
           return request->requestAuthentication();
         }
         // Post-OTA update callback
         if (postUpdateCallback != NULL) postUpdateCallback(!Update.hasError());
-        AsyncWebServerResponse *response = request->beginResponse((Update.hasError()) ? 400 : 200, "text/plain", (Update.hasError()) ? _update_error_str.c_str() : "OK");
+        AsyncWebServerResponse *response = request->beginResponse((Update.hasError()) ? 400 : 200, "text/plain", (Update.hasError()) ? _updateErrorMessage() : "OK");
         response->addHeader("Connection", "close");
         response->addHeader("Access-Control-Allow-Origin", "*");
         request->send(response);
@@ -266,8 +293,8 @@ void ElegantOTAClass::_registerRoutes(){
         }
     }, [&](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
         //Upload handler chunks in data
-        if(_authenticate){
-            if(!request->authenticate(_username.c_str(), _password.c_str())){
+        if(_auth_configuration_invalid || _authenticate){
+            if(_auth_configuration_invalid || !request->authenticate(_username, _password)){
                 return request->requestAuthentication();
             }
         }
@@ -297,13 +324,13 @@ void ElegantOTAClass::_registerRoutes(){
     });
   #else
     _server->on("/ota/upload", HTTP_POST, [&](){
-      if (_authenticate && !_server->authenticate(_username.c_str(), _password.c_str())) {
+      if (_auth_configuration_invalid || (_authenticate && !_server->authenticate(_username, _password))) {
         return _server->requestAuthentication();
       }
       // Post-OTA update callback
       if (postUpdateCallback != NULL) postUpdateCallback(!Update.hasError());
       _server->sendHeader("Connection", "close");
-      _server->send((Update.hasError()) ? 400 : 200, "text/plain", (Update.hasError()) ? _update_error_str.c_str() : "OK");
+      _server->send((Update.hasError()) ? 400 : 200, "text/plain", (Update.hasError()) ? _updateErrorMessage() : "OK");
       // Set reboot flag
       if (!Update.hasError()) {
         if (_auto_reboot) {
@@ -316,7 +343,7 @@ void ElegantOTAClass::_registerRoutes(){
       HTTPUpload& upload = _server->upload();
       if (upload.status == UPLOAD_FILE_START) {
         // Check authentication
-        if (_authenticate && !_server->authenticate(_username.c_str(), _password.c_str())) {
+        if (_auth_configuration_invalid || (_authenticate && !_server->authenticate(_username, _password))) {
           ELEGANTOTA_DEBUG_MSG("Authentication Failed on UPLOAD_FILE_START\n");
           return;
         }
@@ -354,14 +381,43 @@ void ElegantOTAClass::_registerRoutes(){
 // Configuration
 // ---------------------------------------------------------------------------
 
-void ElegantOTAClass::setAuth(const char * username, const char * password){
-  _username = username;
-  _password = password;
-  _authenticate = _username.length() && _password.length();
+bool ElegantOTAClass::setAuth(const char * username, const char * password){
+  char copied_username[MAX_AUTH_LENGTH + 1] = {};
+  char copied_password[MAX_AUTH_LENGTH + 1] = {};
+  size_t username_length;
+  size_t password_length;
+  const bool username_fits = _copyBounded(username, copied_username, sizeof(copied_username), username_length);
+  const bool password_fits = _copyBounded(password, copied_password, sizeof(copied_password), password_length);
+
+  if (!username_fits || !password_fits || (username_length == 0) != (password_length == 0)) {
+    memset(_username, 0, sizeof(_username));
+    memset(_password, 0, sizeof(_password));
+    _username_length = 0;
+    _password_length = 0;
+    _authenticate = false;
+    _auth_configuration_invalid = true;
+    ELEGANTOTA_DEBUG_MSG("ERROR: Invalid authentication credentials\n");
+    return false;
+  }
+
+  memset(_username, 0, sizeof(_username));
+  memset(_password, 0, sizeof(_password));
+  memcpy(_username, copied_username, username_length + 1);
+  memcpy(_password, copied_password, password_length + 1);
+  _username_length = username_length;
+  _password_length = password_length;
+  _authenticate = username_length != 0;
+  _auth_configuration_invalid = false;
+  return true;
 }
 
 void ElegantOTAClass::clearAuth(){
+  memset(_username, 0, sizeof(_username));
+  memset(_password, 0, sizeof(_password));
+  _username_length = 0;
+  _password_length = 0;
   _authenticate = false;
+  _auth_configuration_invalid = false;
 }
 
 void ElegantOTAClass::setAutoReboot(bool enable){

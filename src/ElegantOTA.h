@@ -109,11 +109,24 @@ enum OTA_Mode {
 
 class ElegantOTAClass{
   public:
+    /** Maximum accepted username or password length, excluding its NUL byte. */
+    static const size_t MAX_AUTH_LENGTH = 64;
+    /** Maximum Update error text retained for an HTTP error response. */
+    static const size_t MAX_UPDATE_ERROR_LENGTH = 128;
+
     ElegantOTAClass();
 
     void begin(ELEGANTOTA_WEBSERVER *server, const char * username = "", const char * password = "");
 
-    void setAuth(const char * username, const char * password);
+    /**
+     * Configure HTTP Basic authentication.
+     *
+     * Both credentials must be at most MAX_AUTH_LENGTH bytes. Supplying one
+     * empty credential or an overlong credential returns false and rejects all
+     * protected routes until clearAuth() or a valid setAuth() call is made;
+     * credentials are never silently truncated.
+     */
+    bool setAuth(const char * username, const char * password);
     void clearAuth();
     void setAutoReboot(bool enable);
     void loop();
@@ -125,15 +138,19 @@ class ElegantOTAClass{
   private:
     ELEGANTOTA_WEBSERVER *_server;
 
-    bool _authenticate;
-    String _username;
-    String _password;
+    bool _authenticate = false;
+    bool _auth_configuration_invalid = false;
+    char _username[MAX_AUTH_LENGTH + 1] = {};
+    char _password[MAX_AUTH_LENGTH + 1] = {};
+    size_t _username_length = 0;
+    size_t _password_length = 0;
 
     bool _auto_reboot = true;
     bool _reboot = false;
     unsigned long _reboot_request_millis = 0;
 
-    String _update_error_str = "";
+    char _update_error[MAX_UPDATE_ERROR_LENGTH + 1] = {};
+    size_t _update_error_length = 0;
     unsigned long _current_progress_size;
 
     std::function<void()> preUpdateCallback = NULL;
@@ -145,7 +162,9 @@ class ElegantOTAClass{
     size_t _partitionSize(OTA_Mode mode);
     bool _beginUpdate(OTA_Mode mode);
     void _abortUpdate();
-    static bool _validMD5(const char * hash);
+    static bool _copyMD5(const char * hash, char * out);
+    static bool _copyBounded(const char * source, char * destination, size_t capacity, size_t &length);
+    const char * _updateErrorMessage() const;
     void _captureUpdateError();
     void _buildMetadata(char * out, size_t len);
 };
